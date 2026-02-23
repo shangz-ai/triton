@@ -104,6 +104,7 @@ def _p_matmul_ogs(
              UPCAST_INDICES: tl.constexpr=False,
              SWAP_XW: tl.constexpr = False,
              IS_EPILOGUE_QUANT_MXFP8: tl.constexpr = False,
+             W_SHUFFLED: tl.constexpr = False,
              pYPtrs=None,
              ScatterShardIndx=None,
              reduce_rank=0,
@@ -116,7 +117,8 @@ def _p_matmul_ogs(
         Y = tl.make_tensor_descriptor(YPtr, Y.shape, Y.strides[:-1] + (1,), Y.block_shape)
 
     is_w_microscaled: tl.constexpr = WMxScale is not None
-    tl.static_assert(not is_w_microscaled or W_TRANSPOSE, "NYI. Non-transposed mxfp4 weights")
+    tl.static_assert(not is_w_microscaled or (W_TRANSPOSE or W_SHUFFLED),
+                     "NYI. Non-transposed mxfp4 weights")
     MX_PACK_DIVISOR: tl.constexpr = MXFP_BLOCK_SIZE
     if is_w_microscaled:
         w_type: tl.constexpr = get_dtype(W)
@@ -295,7 +297,22 @@ def _p_matmul_ogs(
                     x = tl.load(XPtrs, mask=mask_k[None, :], other=0.0)
 
             # --- load w ---
-            if W_TRANSPOSE:
+            if W_SHUFFLED:
+                # BLACKWELL_MX4_VALUE_SHUFFLED layout (5D):
+                #   [E, num_tiles_k, num_tiles_n, BLOCK_N, PACKED_BLOCK_K_W]
+                # Tile indexing: K tiles first, N tiles second
+                tile_k_idx = off_k_w // PACKED_BLOCK_K_W
+                tile_n_idx = off_n // BLOCK_N
+                expt_id32 = expt_id.to(tl.int32)
+                tile_k_idx32 = tile_k_idx.to(tl.int32)
+                tile_n_idx32 = tile_n_idx.to(tl.int32)
+                # Load [1, 1, 1, BLOCK_N, PACKED_BLOCK_K_W], reshape and transpose
+                # to get [PACKED_BLOCK_K_W, BLOCK_N] like baseline
+                w = tl.reshape(
+                    W.load([expt_id32, tile_k_idx32, tile_n_idx32, 0, 0]),
+                    (BLOCK_N, PACKED_BLOCK_K_W),
+                ).T
+            elif W_TRANSPOSE:
                 w = tl.reshape(W.load([expt_id, off_n, off_k_w]), W.block_shape[1:]).T
             else:
                 w = tl.reshape(W.load([expt_id, off_k_w, off_n]), W.block_shape[1:])
@@ -399,6 +416,11 @@ def _p_matmul_ogs(
         else:
             w_scale = load_scale(WScale)
 
+        # When SWAP_XW is True, the accumulator is [BLOCK_N, BLOCK_M] (transposed).
+        # Transpose it before subtiling so the split operates on [BLOCK_M, BLOCK_N].
+        if SWAP_XW:
+            acc = acc.T
+
         accs = (acc,)
         biases = (bias,)
 
@@ -426,9 +448,6 @@ def _p_matmul_ogs(
         for a_i in tl.static_range(len(accs)):
             acc_tile = accs[a_i]
             acc_tile *= x_scale * w_scale
-
-            if SWAP_XW:
-                acc_tile = acc_tile.T
 
             acc_tile = acc_tile + biases[a_i][None, :] * betas[:, None]
             if out_alpha is not None:

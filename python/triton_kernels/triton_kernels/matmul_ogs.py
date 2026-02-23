@@ -17,6 +17,7 @@ from .matmul_ogs_details._p_matmul_ogs import _p_matmul_ogs, get_per_device_per_
 from .matmul_ogs_details._reduce_grouped import _reduce_grouped
 from .numerics_details.mxfp import MXFP_BLOCK_SIZE
 from .tensor_details.layout_details.strided import StridedLayout
+from .tensor_details.layout_details.blackwell_value_shuffled import BlackwellMX4ValueShuffledLayout
 from .matmul_ogs_details.opt_flags import make_opt_flags, update_opt_flags_constraints, InapplicableConstraint
 from .specialize import specialize
 from .tensor import Storage, Tensor, FP4, bitwidth, wrap_torch_tensor, RaggedTensorMetadata
@@ -486,8 +487,10 @@ def matmul_ogs(x, w, bias,
         # TODO: remove this code path; using uint8 for mxfp4 weight will bite us when we want to support uint8 for real
         dtype = FP4 if w.dtype == torch.uint8 else w.dtype
         w = wrap_torch_tensor(w, dtype=dtype)
+    w_is_shuffled = isinstance(w.storage.layout, BlackwellMX4ValueShuffledLayout)
     if w_has_mx and (torch.cuda.get_device_capability()[0] < 10 or w.storage.layout is not None and not isinstance(w.storage.layout, StridedLayout)):
-        assert w.stride(-2) == 1, "`w` must be column-major when it has data-type mxfp and (swizzled or not on >=Blackwell)"
+        if not w_is_shuffled:
+            assert w.stride(-2) == 1, "`w` must be column-major when it has data-type mxfp and (swizzled or not on >=Blackwell)"
     if w_scale is not None and not isinstance(w_scale, Tensor):
         w_scale = Tensor(w_scale)
     if w_scale is not None:
@@ -544,6 +547,19 @@ def matmul_ogs(x, w, bias,
     )
     if not can_use_fused_scatter and opt_flags.fused_scatter:
         raise InapplicableConstraint("Fused scatter is not supported")
+    if w_is_shuffled:
+        if bitwidth(w.dtype) != 4:
+            raise ValueError("Shuffled weights are only supported for mxfp4 values")
+        if not opt_flags.is_persistent:
+            raise InapplicableConstraint("Shuffled weights require the persistent TMA kernel")
+        w_layout = w.storage.layout
+        if w_layout.block_k != opt_flags.block_k or w_layout.block_n != opt_flags.block_n:
+            raise ValueError(
+                f"Shuffled weight layout uses block_k={w_layout.block_k} and "
+                f"block_n={w_layout.block_n}, but kernel selected "
+                f"block_k={opt_flags.block_k}, block_n={opt_flags.block_n}. "
+                f"Use disable_mx4_block_swap constraint to match the layout."
+            )
     if inner_routing_data is not None:
         assert opt_flags.block_k == inner_routing_data.block_k
         assert opt_flags.split_k == 1
@@ -614,7 +630,8 @@ def matmul_ogs(x, w, bias,
     has_scatter_tma = opt_flags.fused_scatter and target_info.has_tma_gather()
     y = wrap_torch_tensor(out_matmul.view(math.prod(out_matmul.shape[:-1]), out_matmul.shape[-1]) if opt_flags.fused_scatter else out_matmul.view(math.prod(out_matmul.shape[:-2]), *out_matmul.shape[-2:]))
     x_storage = _canonicalize_storage(x.storage, 2 if has_gather_tma else 3, flex.lhs_data)
-    w_storage = _canonicalize_storage(w.storage, 3, flex.rhs_data)
+    w_storage_ndim = 5 if w_is_shuffled else 3
+    w_storage = _canonicalize_storage(w.storage, w_storage_ndim, flex.rhs_data)
     y_storage = _canonicalize_storage(y.storage, 2 if has_scatter_tma else 3, flex.out_data)
     # create tma descriptor for x
     if y_acc_in is not None:
@@ -667,6 +684,12 @@ def matmul_ogs(x, w, bias,
         "reduce_rank": fused_comm.reduce_rank,
         "n_reduce_shards": fused_comm.n_reduce_shards,
     } if fused_comm is not None else {}
+    
+    # Shuffled layout: only the first 3 strides (E, tiles_k, tiles_n) are needed;
+    # inner tile dims are loaded via TMA descriptors.
+    w_strides = w_storage.data.stride()[:3] if w_is_shuffled else w_storage.data.stride()
+    extra_kernel_kwargs = {"W_SHUFFLED": w_is_shuffled} if opt_flags.is_persistent else {}
+
     (kernels._p_matmul_ogs if opt_flags.is_persistent else kernels._matmul_ogs)[(grid,)](
                    y_tensor_or_tma, y_storage.data, *out_matmul.stride(),
                    *((None, out_matmul_scale, None) if out_matmul_has_mx else out_matmul_flex),
@@ -674,7 +697,7 @@ def matmul_ogs(x, w, bias,
                    x_tensor_or_tma, x_storage.data, *x_strides, x_transpose,
                    flex.lhs_data.scale,
                    None if x_scale is None else x_scale.data.view(torch.uint8), *x_scale_strides,
-                   w_tensor_or_tma, w_storage.data, *w_storage.data.stride(), w_transpose,
+                   w_tensor_or_tma, w_storage.data, *w_strides, w_transpose,
                    flex.rhs_data.scale,
                    w_scale_tensor_or_tma, *w_scale_strides,
                    flex.acc_data.reinterpret(y_acc_in), *y_acc_strides,
@@ -722,7 +745,8 @@ def matmul_ogs(x, w, bias,
                    IS_EPILOGUE_QUANT_MXFP8=epilogue.specs.name == FnName.QUANTIZE_MXFP8.name,
                    NUM_SMS = grid if opt_flags.is_persistent else 0,
                    **fused_comm_kwargs,
-                   **opt_flags.target_kernel_kwargs)
+                   **opt_flags.target_kernel_kwargs,
+                   **extra_kernel_kwargs)
     # Build grouped reduction inputs in a uniform way
     group_indx = None if scatter_indx is None or opt_flags.fused_scatter else scatter_indx.src_indx.view(-1, routing_data.n_expts_act)
     out_final, out_final_mx_scale = reduce_grouped(

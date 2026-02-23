@@ -1,6 +1,7 @@
 from .layout_details.base import Layout
 from .layout_details.blackwell_scale import BlackwellMXScaleLayout
 from .layout_details.blackwell_value import BlackwellMXValueLayout
+from .layout_details.blackwell_value_shuffled import BlackwellMX4ValueShuffledLayout
 from .layout_details.hopper_scale import HopperMXScaleLayout
 from .layout_details.hopper_value import HopperMXValueLayout
 from .layout_details.cdna4_scale import CDNA4MXScaleLayout
@@ -10,6 +11,7 @@ from ..target_info import cuda_capability_geq, is_hip_cdna4
 __all__ = [
     "Layout",
     "BlackwellMXValueLayout",
+    "BlackwellMX4ValueShuffledLayout",
     "BlackwellMXScaleLayout",
     "HopperMXScaleLayout",
     "HopperMXValueLayout",

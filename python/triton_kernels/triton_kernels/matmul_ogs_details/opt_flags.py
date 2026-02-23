@@ -1,5 +1,6 @@
 # isort: off
 # fmt: off
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import triton
@@ -170,7 +171,7 @@ def make_default_opt_flags_nvidia(
     has_y_acc_in,
     constraints,
 ):
-    constraints_supported = ["block_m", "block_k", "split_k", "is_persistent", "fused_scatter", "epilogue_subtile", "num_stages", "idle_sms"]
+    constraints_supported = ["block_m", "block_k", "split_k", "is_persistent", "fused_scatter", "epilogue_subtile", "num_stages", "idle_sms", "disable_mx4_block_swap"]
     assert not any([c not in constraints_supported for c in constraints]), constraints.keys()
     # tokens per expert
     if routing_data is None or batch_size > 1:
@@ -215,7 +216,7 @@ def make_default_opt_flags_nvidia(
         block_k = constraints["block_k"]
     else:
         block_k = opt_flags_nvidia.compute_block_k(m, k, is_persistent, lhs_dtype, rhs_dtype, precision_config, has_y_acc_in)
-    if block_n == 256 and block_k == 128 and block_m <= 64 and is_persistent and rhs_dtype == FP4 and k >= 4096 and tokens_per_expt > 1:
+    if block_n == 256 and block_k == 128 and block_m <= 64 and is_persistent and rhs_dtype == FP4 and k >= 4096 and tokens_per_expt > 1 and not constraints.get("disable_mx4_block_swap", False):
         # Swap block_n and block_k for mxfp4 weights so that block_k is a full cacheline, so long as K is sufficiently large.
         # TODO: swizzle the HBM layout of the weights instead
         block_n, block_k = block_k, block_n
@@ -283,7 +284,8 @@ def make_default_opt_flags_nvidia(
         idle_sms=constraints.get("idle_sms", 0),
     )
     # check constraints
-    assert all(getattr(ret, ck) == cv for ck, cv in constraints.items() if cv is not None), f"{ret} != {constraints}"
+    meta_constraints = {"disable_mx4_block_swap"}
+    assert all(getattr(ret, ck) == cv for ck, cv in constraints.items() if cv is not None and ck not in meta_constraints), f"{ret} != {constraints}"
     return ret
 
 # --------------
@@ -300,6 +302,17 @@ def update_opt_flags_constraints(constraints: dict[str, int]):
 def reset_opt_flags_constraints():
     global _opt_flags_constraints
     _opt_flags_constraints = dict()
+
+@contextmanager
+def scoped_opt_flags_constraints(constraints):
+    """Temporarily add constraints, restoring the original state on exit."""
+    saved = dict(_opt_flags_constraints)
+    _opt_flags_constraints.update(constraints)
+    try:
+        yield
+    finally:
+        _opt_flags_constraints.clear()
+        _opt_flags_constraints.update(saved)
 
 def set_opt_flags(opt_flags: OptFlags):
     global _opt_flags
