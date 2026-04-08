@@ -1,4 +1,3 @@
-from itertools import chain
 from pathlib import Path
 from copy import deepcopy
 import os
@@ -45,8 +44,7 @@ def _shuffle_mx4_weights(tensor, block_k, block_n):
     shuffled_layout = BlackwellMX4ValueShuffledLayout(block_k=block_k, block_n=block_n)
     transformation = shuffled_layout.make_transformation([E, K_logical, N], True)
     shuffled_data = transformation.swizzle_data(data)
-    return TKTensor(Storage(shuffled_data, shuffled_layout),
-                    shape=list(tensor.shape), dtype=tensor.dtype)
+    return TKTensor(Storage(shuffled_data, shuffled_layout), shape=list(tensor.shape), dtype=tensor.dtype)
 
 
 def _infer_opt_flags(x, w, ragged_metadata, pc):
@@ -67,21 +65,15 @@ def _infer_opt_flags(x, w, ragged_metadata, pc):
     out_dtype = torch_dtype_to_dtype(out_dtype)
     x_transpose = x.stride(-1) != 1
     b_scale = pc.b_mx_scale
-    can_use_tma = (
-        x.numel() > 0 and is_tma_compliant(x) and
-        w.numel() > 0 and is_tma_compliant(w) and
-        (b_scale is None or is_tma_compliant(b_scale))
-    )
+    can_use_tma = (x.numel() > 0 and is_tma_compliant(x) and w.numel() > 0 and is_tma_compliant(w)
+                   and (b_scale is None or is_tma_compliant(b_scale)))
     # Respects any constraints set by the caller via scoped_opt_flags_constraints
-    opt_flags = make_opt_flags(
-        out_dtype, x.dtype, w.dtype, pc,
-        batch_size, M, N, K,
-        ragged_metadata,
-        can_use_tma, False,  # can_use_split_k=False for MoE
-        None,  # epilogue_effective_itemsize
-        x_transpose, False,  # has_y_acc_in
-        None,  # block_k
-    )
+    opt_flags = make_opt_flags(out_dtype, x.dtype, w.dtype, pc, batch_size, M, N, K, ragged_metadata, can_use_tma,
+                               False,  # can_use_split_k=False for MoE
+                               None,  # epilogue_effective_itemsize
+                               x_transpose, False,  # has_y_acc_in
+                               None,  # block_k
+                               )
     return opt_flags
 
 
@@ -154,9 +146,8 @@ def run_mlp(x_dp_local_bf16, x_dp_local_fp8,  # activations
     return z_dp_local
 
 
-def bench_mlp(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, EP,
-              shuffle_mx4=False, num_stages_fc1=None, num_stages_fc2=None,
-              epilogue_subtile_fc1=None):
+def bench_mlp(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_dtype, EP, shuffle_mx4=False,
+              num_stages_fc1=None, num_stages_fc2=None, epilogue_subtile_fc1=None):
     assert n_expts_tot % EP == 0
     rank = torch.distributed.get_rank()
     n_ranks = torch.distributed.get_world_size()
@@ -196,8 +187,7 @@ def bench_mlp(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_d
     if w_dtype == FP4:
         num_warps = 4 if batch <= 512 else 8
         value_layout = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
-        scale_layout = layout.make_default_matmul_mxfp4_w_scale_layout(
-            mx_axis=1, num_warps=num_warps)
+        scale_layout = layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1, num_warps=num_warps)
         opt1 = {
             "value_layout": value_layout,
             "scale_layout": scale_layout,
@@ -260,8 +250,8 @@ def bench_mlp(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_d
                 w1_ep_local = _shuffle_mx4_weights(w1_ep_local, w1_block_k, w1_block_n)
 
                 # Run W1 once to get intermediate for W2 block shape inference
-                y_fc1_dry = matmul(y_dry, w1_ep_local, b1_ep_local, a_ragged_metadata=y_meta_dry,
-                                   precision_config=pc1, fused_activation=act1)
+                y_fc1_dry = matmul(y_dry, w1_ep_local, b1_ep_local, a_ragged_metadata=y_meta_dry, precision_config=pc1,
+                                   fused_activation=act1)
 
                 # Infer block shapes for W2 (includes the block swap)
                 opt_flags_w2 = _infer_opt_flags(y_fc1_dry, w2_ep_local, y_meta_dry, pc2)
@@ -294,8 +284,8 @@ def bench_mlp(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_d
             wg_global, bg_global, pcg,  #
             w1_ep_local, b1_ep_local, pc1, act1,  #
             w2_ep_local, b2_ep_local, pc2,  #
-            n_expts_act, expt_assignment, rank, symm_mem_pool,
-            fc1_constraints=fc1_constraints, fc2_constraints=fc2_constraints)
+            n_expts_act, expt_assignment, rank, symm_mem_pool, fc1_constraints=fc1_constraints,
+            fc2_constraints=fc2_constraints)
     torch.cuda.synchronize()
     proton.start(str(fpath), hook="triton")
     for i in range(100):
@@ -303,8 +293,8 @@ def bench_mlp(batch_per_expt, dim1, dim2, n_expts_tot, n_expts_act, x_dtype, w_d
                 wg_global, bg_global, pcg,  #
                 w1_ep_local, b1_ep_local, pc1, act1,  #
                 w2_ep_local, b2_ep_local, pc2,  #
-                n_expts_act, expt_assignment, rank, symm_mem_pool,
-                fc1_constraints=fc1_constraints, fc2_constraints=fc2_constraints)
+                n_expts_act, expt_assignment, rank, symm_mem_pool, fc1_constraints=fc1_constraints,
+                fc2_constraints=fc2_constraints)
     torch.cuda.synchronize()
     torch.distributed.barrier()
     proton.finalize()
@@ -371,16 +361,14 @@ if __name__ == "__main__":
     # 2. MX4 baseline
     roofline_mlp(batch_sizes, x_dtype=quantized_dtypes[0], w_dtype=quantized_dtypes[1], **moe_args)
     # 3. MX4 shuffled
-    roofline_mlp(batch_sizes, x_dtype=quantized_dtypes[0], w_dtype=quantized_dtypes[1],
-                 shuffle_mx4=True, **moe_args)
+    roofline_mlp(batch_sizes, x_dtype=quantized_dtypes[0], w_dtype=quantized_dtypes[1], shuffle_mx4=True, **moe_args)
     # 4. MX4 shuffled + FC2 5stg
-    roofline_mlp(batch_sizes, x_dtype=quantized_dtypes[0], w_dtype=quantized_dtypes[1],
-                 shuffle_mx4=True, num_stages_fc2=5, **moe_args)
+    roofline_mlp(batch_sizes, x_dtype=quantized_dtypes[0], w_dtype=quantized_dtypes[1], shuffle_mx4=True,
+                 num_stages_fc2=5, **moe_args)
     # 5. MX4 shuffled + FC1 subtile2+5stg + FC2 5stg
     #    block_k=128 (swap disabled) + subtile=2 frees enough smem for 5 stages
-    roofline_mlp(batch_sizes, x_dtype=quantized_dtypes[0], w_dtype=quantized_dtypes[1],
-                 shuffle_mx4=True, epilogue_subtile_fc1=2,
-                 num_stages_fc1=5, num_stages_fc2=5, **moe_args)
+    roofline_mlp(batch_sizes, x_dtype=quantized_dtypes[0], w_dtype=quantized_dtypes[1], shuffle_mx4=True,
+                 epilogue_subtile_fc1=2, num_stages_fc1=5, num_stages_fc2=5, **moe_args)
 
     torch.distributed.barrier()
     torch.distributed.destroy_process_group()

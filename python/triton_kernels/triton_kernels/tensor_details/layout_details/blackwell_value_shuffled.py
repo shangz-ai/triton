@@ -33,8 +33,7 @@ class BlackwellMX4ValueShuffledLayout(Layout):
         return "BLACKWELL_MX4_VALUE_SHUFFLED"
 
     def make_transformation(self, shape: list[int], is_fp4: bool) -> LayoutTransformation:
-        return BlackwellMX4ValueShuffledTransformation(shape, is_fp4,
-                                                       block_k=self.block_k, block_n=self.block_n)
+        return BlackwellMX4ValueShuffledTransformation(shape, is_fp4, block_k=self.block_k, block_n=self.block_n)
 
     def swizzle_block_shape(self, block_shape):
         """
@@ -48,8 +47,7 @@ class BlackwellMX4ValueShuffledLayout(Layout):
             raise ValueError(f"Expected 3D block_shape, got {len(block_shape)}D: {block_shape}")
         _, block_k, block_n = block_shape
         if block_k != self.block_k:
-            raise ValueError(
-                f"block_k={block_k} does not match layout block_k={self.block_k}")
+            raise ValueError(f"block_k={block_k} does not match layout block_k={self.block_k}")
         # Return block_k un-halved; make_dense_tma will halve it for FP4 packing
         return [1, 1, 1, block_n, block_k]
 
@@ -90,8 +88,7 @@ class BlackwellMX4ValueShuffledTransformation(LayoutTransformation):
 
         # Pad to tile boundaries if needed (in original [E, K_packed, N] space)
         if K_packed != padded_K_packed or N != padded_N:
-            padded = torch.zeros((E, padded_K_packed, padded_N),
-                                 dtype=data.dtype, device=data.device)
+            padded = torch.zeros((E, padded_K_packed, padded_N), dtype=data.dtype, device=data.device)
             padded[:, :K_packed, :N] = data
             data = padded
 
